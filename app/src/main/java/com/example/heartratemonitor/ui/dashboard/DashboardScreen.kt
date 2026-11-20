@@ -2,9 +2,11 @@ package com.example.heartratemonitor.ui.dashboard
 
 import android.os.SystemClock
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -14,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -25,9 +28,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -39,11 +44,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.heartratemonitor.SensorViewModel
+import com.example.heartratemonitor.R
+import com.example.heartratemonitor.SensorController
 import com.example.heartratemonitor.bluetooth.ConnectionState
 import com.example.heartratemonitor.bluetooth.READING_FRESHNESS_MS
 import com.example.heartratemonitor.bluetooth.SensorState
@@ -58,13 +67,15 @@ data class ChartPoint(val atMs: Long, val bpm: Int, val startsSegment: Boolean)
 
 @Composable
 fun DashboardScreen(
-    model: SensorViewModel,
+    model: SensorController,
     state: SensorState,
     message: String?,
     simulated: Boolean,
     scan: () -> Unit,
     reconnect: () -> Unit,
     connect: (String) -> Unit,
+    onTrackingRequested: () -> Unit,
+    openNotificationSettings: () -> Unit,
     toggleSimulator: () -> Unit,
 ) {
     val workouts = model.workouts
@@ -96,9 +107,17 @@ fun DashboardScreen(
         return
     }
 
+    val dashboardView = LocalView.current
+    val keepScreenOn = phase == WorkoutPhase.ACTIVE && model.keepScreenAwake
+    DisposableEffect(dashboardView, keepScreenOn) {
+        dashboardView.keepScreenOn = keepScreenOn
+        onDispose { dashboardView.keepScreenOn = false }
+    }
+
     Scaffold { insets ->
         BoxWithConstraints(Modifier.fillMaxWidth().padding(insets)) {
             val wide = maxWidth >= 680.dp && maxWidth > maxHeight
+            val inlineHeader = maxWidth >= 560.dp
             Column(
                 Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(
                     horizontal = if (wide) 24.dp else 18.dp,
@@ -106,16 +125,26 @@ fun DashboardScreen(
                 ),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("Home Gym", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                val navigation: @Composable () -> Unit = {
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         TextButton(onClick = { showMonitor = true }) { Text("Monitor") }
                         TextButton(onClick = { showHistory = true }) { Text("History") }
                         TextButton(onClick = { showSettings = true }) { Text("Settings") }
+                    }
+                }
+                if (inlineHeader) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        DashboardLogo(Modifier.weight(1f, fill = false))
+                        navigation()
+                    }
+                } else {
+                    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                        DashboardLogo()
+                        navigation()
                     }
                 }
                 val heart: @Composable () -> Unit = {
@@ -124,9 +153,15 @@ fun DashboardScreen(
                 val workout: @Composable () -> Unit = {
                     WorkoutPanel(
                         phase, elapsedMs, workouts.ready && !workouts.busy, workouts.restored, workouts.pendingSave,
-                        start = { workouts.start(model.configuredMaxHr ?: 185) },
+                        start = {
+                            workouts.start(model.configuredMaxHr ?: 185)
+                            onTrackingRequested()
+                        },
                         pause = workouts::pause,
-                        resume = workouts::resume,
+                        resume = {
+                            workouts.resume()
+                            onTrackingRequested()
+                        },
                         retry = workouts::finish,
                     ) {
                         confirmFinish = true
@@ -147,6 +182,9 @@ fun DashboardScreen(
                     chart()
                 }
                 workouts.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                if (phase == WorkoutPhase.ACTIVE) {
+                    model.trackingError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                }
                 if (model.configuredMaxHr == null) {
                     TextButton(onClick = { showSettings = true }) { Text("Set your max HR · 185 BPM provisional") }
                 }
@@ -200,7 +238,13 @@ fun DashboardScreen(
         )
     }
     if (showSettings) {
-        MaxHeartRateDialog(model.configuredMaxHr, { showSettings = false }) {
+        DashboardSettingsDialog(
+            configured = model.configuredMaxHr,
+            keepScreenAwake = model.keepScreenAwake,
+            onKeepScreenAwakeChanged = model::updateKeepScreenAwake,
+            openNotificationSettings = openNotificationSettings,
+            close = { showSettings = false },
+        ) {
             model.setMaxHeartRate(it)
             showSettings = false
         }
@@ -219,6 +263,15 @@ fun DashboardScreen(
             },
         )
     }
+}
+
+@Composable
+private fun DashboardLogo(modifier: Modifier = Modifier) {
+    Image(
+        painter = painterResource(R.drawable.zachs_zones_header),
+        contentDescription = stringResource(R.string.app_name),
+        modifier = modifier.width(352.dp).aspectRatio(3f),
+    )
 }
 
 @Composable
@@ -352,14 +405,31 @@ internal fun Panel(content: @Composable ColumnScope.() -> Unit) {
 }
 
 @Composable
-private fun MaxHeartRateDialog(configured: Int?, close: () -> Unit, save: (Int) -> Unit) {
+private fun DashboardSettingsDialog(
+    configured: Int?,
+    keepScreenAwake: Boolean,
+    onKeepScreenAwakeChanged: (Boolean) -> Unit,
+    openNotificationSettings: () -> Unit,
+    close: () -> Unit,
+    save: (Int) -> Unit,
+) {
     var input by rememberSaveable { mutableStateOf(configured?.toString() ?: "185") }
     val value = input.toIntOrNull()?.takeIf { it in 1..999 }
     AlertDialog(
         onDismissRequest = close,
-        title = { Text("Maximum heart rate") },
+        title = { Text("Settings") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text("Keep screen awake", Modifier.weight(1f))
+                    Switch(checked = keepScreenAwake, onCheckedChange = onKeepScreenAwakeChanged)
+                }
+                TextButton(onClick = openNotificationSettings) { Text("Workout notification settings") }
+                Text("Maximum heart rate", style = MaterialTheme.typography.titleMedium)
                 if (configured == null) Text("185 BPM is the provisional default. Enter your maximum heart rate.")
                 OutlinedTextField(
                     value = input,

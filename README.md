@@ -40,3 +40,11 @@ Start a workout, then choose **Monitor → Use simulator** for a strap-free test
 For a recovery test, start another workout, let it run for at least ten seconds, then force-stop the app and reopen it. The app restores the latest checkpoint with **Resume** and **Finish**. Time between the checkpoint and relaunch is excluded. The app checkpoints every five seconds while active and also at start, pause, resume, and when the dashboard goes into the background.
 
 Completed workouts appear in **History**. Use **View workout** to reopen the summary or **Delete** to remove the workout and samples. Workouts are stored as atomic JSON files in the app's private internal storage. Background collection from the physical strap is planned for Build 5.
+
+## Build 5 — Background tracking
+
+Use **Settings → Workout notification settings** to allow the ongoing workout notification. Start or resume a workout from the dashboard. While the workout is active, you can switch apps or lock the tablet. Tap the notification to return. Pausing or finishing stops the foreground service. **Keep screen awake** is on by default and applies when the active dashboard is visible.
+
+To test without the strap, enable the simulator, start a workout, and lock the tablet for about 15 seconds. Unlock it, finish, and check that the summary chart includes readings during the locked interval. Repeat with a pause to check that paused time is excluded. A force-stop ends background tracking and the app offers recovery from the last saved checkpoint on relaunch.
+
+For a signed release APK, use **Build → Generate Signed App Bundle or APK** in Android Studio and select **APK** and the **release** build variant. Keep the signing key outside this repository. Android requires the same signing key to install an update over an existing app. A separately signed release APK cannot update this debug installation in place.
