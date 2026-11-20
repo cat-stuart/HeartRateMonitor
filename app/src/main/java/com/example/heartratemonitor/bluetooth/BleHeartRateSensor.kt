@@ -17,6 +17,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
+import android.os.SystemClock
 import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -292,6 +293,7 @@ class BleHeartRateSensor(private val context: Context) : HeartRateSensor {
 
     private fun receive(connection: BluetoothGatt, packet: ByteArray) {
         val bpm = HeartRateParser.parse(packet) ?: return
+        val readingAtMs = SystemClock.elapsedRealtime()
         onCurrent(connection) {
             val monitor = target ?: return@onCurrent
             if (savedMonitor?.id != monitor.id || savedMonitor?.name != monitor.name) {
@@ -299,8 +301,13 @@ class BleHeartRateSensor(private val context: Context) : HeartRateSensor {
                 store.save(monitor)
             }
             retryIndex = 0
-            publish(SensorState(connection = ConnectionState.CONNECTED, status = "Live from monitor", bpm = bpm))
-            armTimeout(FRESHNESS_MS)
+            publish(SensorState(
+                connection = ConnectionState.CONNECTED,
+                status = "Live from monitor",
+                bpm = bpm,
+                readingAtMs = readingAtMs,
+            ))
+            armTimeout(READING_FRESHNESS_MS)
         }
     }
 
@@ -319,7 +326,6 @@ class BleHeartRateSensor(private val context: Context) : HeartRateSensor {
         name?.startsWith("Polar H10", ignoreCase = true) == true
 
     private companion object {
-        const val FRESHNESS_MS = 5_000L
         val RETRY_DELAYS = longArrayOf(2_000, 5_000, 10_000, 20_000, 30_000)
         val SERVICE: UUID = UUID.fromString("0000180d-0000-1000-8000-00805f9b34fb")
         val MEASUREMENT: UUID = UUID.fromString("00002a37-0000-1000-8000-00805f9b34fb")

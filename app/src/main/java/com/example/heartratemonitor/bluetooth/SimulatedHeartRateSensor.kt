@@ -2,6 +2,7 @@ package com.example.heartratemonitor.bluetooth
 
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
@@ -13,7 +14,12 @@ class SimulatedHeartRateSensor : HeartRateSensor {
     private val samples = listOf(84, 87, 92, 99, 107, 114, 120, 115, 108, 97, 89)
     private val tick = object : Runnable {
         override fun run() {
-            mutableState.value = SensorState(status = "Simulated reading", bpm = samples[nextSample])
+            mutableState.value = SensorState(
+                connection = ConnectionState.CONNECTED,
+                status = "Simulated reading",
+                bpm = samples[nextSample],
+                readingAtMs = SystemClock.elapsedRealtime(),
+            )
             nextSample = (nextSample + 1) % samples.size
             handler.postDelayed(this, 1_000)
         }
@@ -31,6 +37,15 @@ class SimulatedHeartRateSensor : HeartRateSensor {
         if (id != "simulated") return
         stop()
         tick.run()
+    }
+
+    fun simulateDropout() {
+        handler.removeCallbacks(tick)
+        mutableState.value = SensorState(
+            connection = ConnectionState.RECONNECTING,
+            status = "Simulated signal loss",
+        )
+        handler.postDelayed(tick, 8_000)
     }
 
     override fun stop() {

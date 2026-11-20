@@ -2,6 +2,8 @@ package com.example.heartratemonitor.bluetooth
 
 import kotlinx.coroutines.flow.StateFlow
 
+const val READING_FRESHNESS_MS = 5_000L
+
 data class SensorDevice(val id: String, val name: String, val rssi: Int?)
 
 enum class ConnectionState {
@@ -15,6 +17,7 @@ data class SensorState(
     val status: String = "Ready to scan",
     val devices: List<SensorDevice> = emptyList(),
     val bpm: Int? = null,
+    val readingAtMs: Long? = null,
     val busy: Boolean = false,
 )
 

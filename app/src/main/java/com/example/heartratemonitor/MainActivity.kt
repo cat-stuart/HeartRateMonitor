@@ -15,23 +15,9 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -41,7 +27,18 @@ import com.example.heartratemonitor.bluetooth.ConnectionState
 import com.example.heartratemonitor.bluetooth.HeartRateSensor
 import com.example.heartratemonitor.bluetooth.SensorState
 import com.example.heartratemonitor.bluetooth.SimulatedHeartRateSensor
+import com.example.heartratemonitor.ui.dashboard.DashboardScreen
+import com.example.heartratemonitor.ui.dashboard.ChartPoint
+import com.example.heartratemonitor.ui.dashboard.CHART_WINDOW_MS
 import com.example.heartratemonitor.ui.theme.HeartRateMonitorTheme
+import com.example.heartratemonitor.workout.WorkoutFileStore
+import com.example.heartratemonitor.workout.WorkoutSessions
+import java.io.File
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val model by lazy { ViewModelProvider(this)[SensorViewModel::class.java] }
@@ -71,10 +68,11 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         scanRequested = savedInstanceState?.getBoolean("scanRequested") ?: false
         setContent {
-            HeartRateMonitorTheme(darkTheme = true) {
+            HeartRateMonitorTheme(darkTheme = true, dynamicColor = false) {
                 val sensor = model.sensor
                 val state by sensor.state.collectAsState()
-                SensorScreen(
+                DashboardScreen(
+                    model = model,
                     state = state,
                     message = model.message,
                     simulated = model.simulated,
@@ -111,7 +109,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         unregisterReceiver(bluetoothChanges)
-        if (!isChangingConfigurations) model.updateBluetooth(false, false, false)
+        if (!isChangingConfigurations) {
+            model.workouts.checkpoint()
+            model.updateBluetooth(false, false, false)
+        }
         super.onStop()
     }
 
@@ -164,10 +165,51 @@ class MainActivity : ComponentActivity() {
 class SensorViewModel(application: Application) : AndroidViewModel(application) {
     private val bluetooth = BleHeartRateSensor(application)
     private val simulator by lazy { SimulatedHeartRateSensor() }
+    private val settings = application.getSharedPreferences("dashboard_settings", Context.MODE_PRIVATE)
+    private val chartScope = CoroutineScope(Dispatchers.Main.immediate)
+    private var chartJob: Job? = null
+    private var chartGap = true
+    val workouts = WorkoutSessions(WorkoutFileStore(File(application.filesDir, "workouts")), chartScope)
+    var configuredMaxHr by mutableStateOf(settings.getInt("max_hr", 0).takeIf { it > 0 })
+        private set
+    var chartPoints by mutableStateOf(emptyList<ChartPoint>())
+        private set
     var simulated by mutableStateOf(false)
         private set
     var message by mutableStateOf<String?>(null)
     val sensor: HeartRateSensor get() = if (simulated) simulator else bluetooth
+
+    init {
+        observeChart()
+    }
+
+    fun setMaxHeartRate(bpm: Int) {
+        require(bpm in 1..999)
+        settings.edit().putInt("max_hr", bpm).apply()
+        configuredMaxHr = bpm
+    }
+
+    private fun observeChart() {
+        chartJob?.cancel()
+        chartGap = true
+        workouts.sensorGap()
+        chartPoints = emptyList()
+        chartJob = chartScope.launch {
+            sensor.state.collect { sample ->
+                val bpm = sample.bpm
+                val time = sample.readingAtMs
+                if (bpm == null || time == null) {
+                    chartGap = true
+                    workouts.sensorGap()
+                } else if (chartPoints.lastOrNull()?.atMs != time) {
+                    workouts.addReading(time, bpm)
+                    chartPoints = chartPoints.dropWhile { time - it.atMs > CHART_WINDOW_MS } +
+                        ChartPoint(time, bpm, chartGap)
+                    chartGap = false
+                }
+            }
+        }
+    }
 
     fun updateBluetooth(inForeground: Boolean, permitted: Boolean, enabled: Boolean) {
         if (simulated) return
@@ -176,6 +218,7 @@ class SensorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun reconnect() = bluetooth.reconnect()
+    fun simulateDropout() { if (simulated) simulator.simulateDropout() }
 
     fun toggleSimulator() {
         if (!BuildConfig.DEBUG) return
@@ -183,55 +226,12 @@ class SensorViewModel(application: Application) : AndroidViewModel(application) 
         message = null
         simulated = !simulated
         if (simulated) sensor.connect("simulated")
+        observeChart()
     }
 
     override fun onCleared() {
+        chartScope.cancel()
         sensor.stop()
-    }
-}
-
-@Composable
-private fun SensorScreen(
-    state: SensorState,
-    message: String?,
-    simulated: Boolean,
-    scan: () -> Unit,
-    reconnect: () -> Unit,
-    connect: (String) -> Unit,
-    toggleSimulator: () -> Unit,
-) {
-    Scaffold { padding ->
-        Column(
-            modifier = Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            Text("Home Gym", style = MaterialTheme.typography.headlineLarge)
-            Text(
-                "Wear your Polar H10 and moisten the electrodes before scanning.",
-                style = MaterialTheme.typography.bodyLarge,
-            )
-            Text("${state.bpm ?: "—"} BPM", style = MaterialTheme.typography.displayLarge)
-            Text(message ?: state.status, style = MaterialTheme.typography.titleMedium)
-            if (!simulated) {
-                state.savedMonitorName?.let { name ->
-                    Text("Saved monitor · $name")
-                    Button(onClick = reconnect) { Text("Reconnect") }
-                }
-                OutlinedButton(onClick = scan, enabled = state.connection != ConnectionState.SCANNING || !state.busy) {
-                    Text("Scan for monitors")
-                }
-            }
-            state.devices.forEach { device ->
-                OutlinedButton(onClick = { connect(device.id) }) {
-                    Text(device.rssi?.let { "${device.name} · $it dBm" } ?: "${device.name} · Paired")
-                }
-            }
-            if (BuildConfig.DEBUG) {
-                OutlinedButton(onClick = toggleSimulator) {
-                    Text(if (simulated) "Use Bluetooth" else "Use simulator")
-                }
-            }
-        }
     }
 }
 
