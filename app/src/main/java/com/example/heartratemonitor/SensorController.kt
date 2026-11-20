@@ -49,6 +49,12 @@ class SensorController(private val application: Application) {
     private val simulator by lazy { SimulatedHeartRateSensor() }
     private val settings = application.getSharedPreferences("dashboard_settings", Context.MODE_PRIVATE)
     private var dashboardVisible = false
+    var setupIntroduced by mutableStateOf(settings.getBoolean("setup_introduced", false))
+        private set
+    var lastMonitorReadingEpochMs by mutableStateOf<Long?>(null)
+        private set
+    var monitorPermissionsGranted by mutableStateOf(false)
+        private set
     var trackingInBackground by mutableStateOf(false)
         private set
     var trackingError by mutableStateOf<String?>(null)
@@ -101,6 +107,7 @@ class SensorController(private val application: Application) {
                     chartGap = true
                     workouts.sensorGap()
                 } else if (chartPoints.lastOrNull()?.atMs != time) {
+                    if (!simulated) lastMonitorReadingEpochMs = System.currentTimeMillis()
                     workouts.addReading(time, bpm)
                     chartPoints = chartPoints.dropWhile { time - it.atMs > CHART_WINDOW_MS } +
                         ChartPoint(time, bpm, chartGap)
@@ -133,6 +140,7 @@ class SensorController(private val application: Application) {
     @SuppressLint("MissingPermission")
     fun refreshBluetooth() {
         val inUse = dashboardVisible || trackingInBackground
+        monitorPermissionsGranted = application.hasMonitorPermissions()
         if (simulated) {
             if (inUse && simulator.state.value.connection == ConnectionState.NOT_CONFIGURED) {
                 simulator.connect("simulated")
@@ -141,10 +149,21 @@ class SensorController(private val application: Application) {
             }
             return
         }
-        val permitted = application.hasMonitorPermissions()
+        val permitted = monitorPermissionsGranted
         val enabled = permitted && application.getSystemService(BluetoothManager::class.java)?.adapter?.isEnabled == true
         bluetooth.updateAvailability(inUse, permitted, enabled)
         if (inUse && permitted && enabled) message = null
+    }
+
+    fun acknowledgeSetup() {
+        settings.edit().putBoolean("setup_introduced", true).apply()
+        setupIntroduced = true
+    }
+
+    fun forgetMonitor() {
+        bluetooth.forgetMonitor()
+        lastMonitorReadingEpochMs = null
+        refreshBluetooth()
     }
 
     fun reconnect() = bluetooth.reconnect()

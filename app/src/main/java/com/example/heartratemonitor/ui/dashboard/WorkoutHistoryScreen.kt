@@ -38,6 +38,7 @@ import java.util.Locale
 @Composable
 internal fun WorkoutHistoryScreen(workouts: WorkoutSessions, onBack: () -> Unit) {
     var pendingDeletion by remember { mutableStateOf<WorkoutRecord?>(null) }
+    var confirmDeleteHistory by remember { mutableStateOf(false) }
     BackHandler(onBack = onBack)
     Scaffold { insets ->
         LazyColumn(
@@ -47,6 +48,11 @@ internal fun WorkoutHistoryScreen(workouts: WorkoutSessions, onBack: () -> Unit)
             item {
                 TextButton(onClick = onBack) { Text("Dashboard") }
                 Text("Workout history", style = MaterialTheme.typography.headlineMedium)
+                if (workouts.history.isNotEmpty()) {
+                    TextButton(onClick = { confirmDeleteHistory = true }, enabled = !workouts.busy) {
+                        Text("Delete all workout history")
+                    }
+                }
             }
             workouts.error?.let { error -> item { Text(error, color = MaterialTheme.colorScheme.error) } }
             if (workouts.history.isEmpty() && workouts.ready) item { Text("No saved workouts yet") }
@@ -62,6 +68,20 @@ internal fun WorkoutHistoryScreen(workouts: WorkoutSessions, onBack: () -> Unit)
                 }
             }
         }
+    }
+    if (confirmDeleteHistory) {
+        AlertDialog(
+            onDismissRequest = { confirmDeleteHistory = false },
+            title = { Text("Delete all workout history?") },
+            text = { Text("This permanently removes completed workouts and their readings from this tablet.") },
+            confirmButton = {
+                Button(onClick = {
+                    workouts.deleteHistory()
+                    confirmDeleteHistory = false
+                }) { Text("Delete all workouts") }
+            },
+            dismissButton = { TextButton(onClick = { confirmDeleteHistory = false }) { Text("Cancel") } },
+        )
     }
     pendingDeletion?.let { record ->
         AlertDialog(

@@ -61,6 +61,8 @@ import com.example.heartratemonitor.bluetooth.READING_FRESHNESS_MS
 import com.example.heartratemonitor.bluetooth.SensorState
 import com.example.heartratemonitor.workout.TrainingZone
 import com.example.heartratemonitor.workout.WorkoutPhase
+import java.text.DateFormat
+import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.delay
 
@@ -85,6 +87,8 @@ fun DashboardScreen(
     var showHistory by rememberSaveable { mutableStateOf(false) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showMonitor by rememberSaveable { mutableStateOf(false) }
+    var confirmForget by rememberSaveable { mutableStateOf(false) }
+    var guidedSetup by rememberSaveable { mutableStateOf(false) }
     var confirmFinish by rememberSaveable { mutableStateOf(false) }
     var now by rememberSaveable { mutableLongStateOf(SystemClock.elapsedRealtime()) }
     LaunchedEffect(Unit) {
@@ -212,6 +216,22 @@ fun DashboardScreen(
         }
     }
 
+    if (!model.setupIntroduced && state.savedMonitorName == null && !simulated && !showMonitor && !showSettings) {
+        AlertDialog(
+            onDismissRequest = model::acknowledgeSetup,
+            title = { Text("Welcome to Zach’s Zones") },
+            text = { Text("Connect your Polar H10 to see live heart rate and set your maximum heart rate for training zones.") },
+            confirmButton = {
+                Button(onClick = {
+                    model.acknowledgeSetup()
+                    guidedSetup = true
+                    showMonitor = true
+                }) { Text("Set up monitor") }
+            },
+            dismissButton = { TextButton(onClick = model::acknowledgeSetup) { Text("Later") } },
+        )
+    }
+
     if (showMonitor) {
         AlertDialog(
             onDismissRequest = { showMonitor = false },
@@ -227,11 +247,12 @@ fun DashboardScreen(
                         Text("Wear your Polar H10 and moisten the electrodes before scanning.")
                         if (state.savedMonitorName != null) {
                             OutlinedButton(onClick = reconnect) { Text("Reconnect") }
+                            TextButton(onClick = { confirmForget = true }) { Text("Forget sensor") }
                         }
                         OutlinedButton(
                             onClick = scan,
                             enabled = state.connection != ConnectionState.SCANNING || !state.busy,
-                        ) { Text("Scan for monitors") }
+                        ) { Text(if (state.savedMonitorName == null) "Scan for monitors" else "Scan to change sensor") }
                         state.devices.forEach { device ->
                             OutlinedButton(onClick = { connect(device.id) }) {
                                 Text(device.rssi?.let { "${device.name} · $it dBm" } ?: "${device.name} · Paired")
@@ -251,12 +272,46 @@ fun DashboardScreen(
                     }
                 }
             },
-            confirmButton = { TextButton(onClick = { showMonitor = false }) { Text("Done") } },
+            confirmButton = {
+                if (guidedSetup && state.savedMonitorName != null && model.configuredMaxHr == null) {
+                    Button(onClick = {
+                        guidedSetup = false
+                        showMonitor = false
+                        showSettings = true
+                    }) { Text("Set max HR") }
+                } else {
+                    TextButton(onClick = {
+                        guidedSetup = false
+                        showMonitor = false
+                    }) { Text("Done") }
+                }
+            },
         )
     }
+    if (confirmForget) {
+        AlertDialog(
+            onDismissRequest = { confirmForget = false },
+            title = { Text("Forget this sensor?") },
+            text = { Text("You can scan again to choose a heart-rate monitor.") },
+            confirmButton = {
+                Button(onClick = {
+                    model.forgetMonitor()
+                    confirmForget = false
+                }) { Text("Forget sensor") }
+            },
+            dismissButton = { TextButton(onClick = { confirmForget = false }) { Text("Cancel") } },
+        )
+    }
+
     if (showSettings) {
         DashboardSettingsDialog(
             configured = model.configuredMaxHr,
+            bluetoothAllowed = model.monitorPermissionsGranted,
+            lastReadingEpochMs = model.lastMonitorReadingEpochMs,
+            openHistory = {
+                showSettings = false
+                showHistory = true
+            },
             keepScreenAwake = model.keepScreenAwake,
             onKeepScreenAwakeChanged = model::updateKeepScreenAwake,
             openNotificationSettings = openNotificationSettings,
@@ -468,6 +523,9 @@ internal fun Panel(
 @Composable
 private fun DashboardSettingsDialog(
     configured: Int?,
+    bluetoothAllowed: Boolean,
+    lastReadingEpochMs: Long?,
+    openHistory: () -> Unit,
     keepScreenAwake: Boolean,
     onKeepScreenAwakeChanged: (Boolean) -> Unit,
     openNotificationSettings: () -> Unit,
@@ -510,6 +568,15 @@ private fun DashboardSettingsDialog(
                         Text("Zone ${zone.number} · ${zone.label} · $boundary")
                     }
                 }
+                Text("Diagnostics", style = MaterialTheme.typography.titleMedium)
+                Text(if (bluetoothAllowed) "Bluetooth permissions granted" else "Bluetooth permissions needed")
+                val last = lastReadingEpochMs?.let {
+                    DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(it))
+                } ?: "No reading this launch"
+                Text("Last monitor reading · $last")
+                Text("App version · ${com.example.heartratemonitor.BuildConfig.VERSION_NAME}")
+                Text("If your monitor is missing, moisten the strap, wear it, and scan again from Monitor.")
+                TextButton(onClick = openHistory) { Text("Workout history") }
             }
         },
         dismissButton = { TextButton(onClick = close) { Text("Cancel") } },

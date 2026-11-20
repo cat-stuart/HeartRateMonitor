@@ -11,6 +11,8 @@ internal class SavedMonitorStore(context: Context) {
         return SensorDevice(id, name, rssi = null)
     }
 
+    fun clear() { preferences.edit().remove("id").remove("name").apply() }
+
     fun save(device: SensorDevice) {
         preferences.edit().putString("id", device.id).putString("name", device.name).apply()
     }

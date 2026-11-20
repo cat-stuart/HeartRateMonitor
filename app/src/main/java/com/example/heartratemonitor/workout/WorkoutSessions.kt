@@ -148,14 +148,24 @@ class WorkoutSessions internal constructor(
         summary = null
     }
 
-    fun delete(record: WorkoutRecord) {
-        if (busy) return
+    fun delete(record: WorkoutRecord) = deleteRecords(listOf(record))
+
+    fun deleteHistory() = deleteRecords(history)
+
+    private fun deleteRecords(records: List<WorkoutRecord>) {
+        if (busy || records.isEmpty()) return
+        val deleted = mutableSetOf<String>()
         busy = true
         launchIo(
-            "Could not delete the workout.",
-            operation = { store.delete(record.id) },
-            complete = { saved ->
-                if (saved) history = history.filterNot { it.id == record.id }
+            "Could not remove all selected workouts. Try again.",
+            operation = {
+                records.forEach { record ->
+                    store.delete(record.id)
+                    deleted.add(record.id)
+                }
+            },
+            complete = {
+                history = history.filterNot { it.id in deleted }
                 busy = false
             },
         )

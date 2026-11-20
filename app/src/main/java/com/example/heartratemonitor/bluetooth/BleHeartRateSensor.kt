@@ -67,6 +67,12 @@ class BleHeartRateSensor(private val context: Context) : HeartRateSensor {
         }
     }
 
+    fun forgetMonitor() {
+        savedMonitor = null
+        store.clear()
+        stop()
+    }
+
     fun reconnect() {
         if (!active) return
         val monitor = savedMonitor ?: run {

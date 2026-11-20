@@ -64,8 +64,8 @@ The separate physical interval clock will handle dedicated interval training.
 | Application architecture | MVVM |
 | Reactive state | Kotlin Coroutines and StateFlow |
 | Bluetooth | Native Android BLE APIs |
-| Local database | Room |
-| Preferences | DataStore |
+| Workout storage | Versioned JSON files in private internal storage |
+| Preferences | Android SharedPreferences |
 | Navigation | Navigation Compose |
 | Dependency injection | Hilt, if convenient |
 | Charts | Lightweight Compose Canvas drawing |
@@ -103,13 +103,7 @@ app/
         WorkoutState.kt  
         HeartRateZoneCalculator.kt  
         WorkoutSummaryCalculator.kt
-
-      data/  
-        WorkoutEntity.kt  
-        HeartRateSampleEntity.kt  
-        WorkoutDao.kt  
-        AppDatabase.kt  
-        SettingsRepository.kt
+        WorkoutFileStore.kt
 
       ui/  
         dashboard/  
@@ -606,60 +600,13 @@ No cloud syncing is required.
 
 ## **9\. Local Data Model**
 
-Use Room for persistent workout data.
+Store one versioned JSON file per workout in private internal storage. Replace it atomically when writing a checkpoint or completing a session. A completed file contains the workout start and finish times, active duration, maximum heart rate setting, and samples. An unfinished file serves as the current checkpoint. Save it at start, pause, resume, when leaving the dashboard, and every five seconds during active recording. Restore unfinished sessions paused and exclude time after their latest checkpoint.
 
-### **Workout entity**
-
-data class WorkoutEntity(  
-    val id: String,  
-    val startedAtEpochMs: Long,  
-    val finishedAtEpochMs: Long?,  
-    val activeDurationMs: Long,  
-    val pausedDurationMs: Long,  
-    val maxHrSetting: Int,  
-    val averageHr: Double?,  
-    val peakHr: Int?,  
-    val state: String,  
-    val name: String,  
-    val noDataDurationMs: Long  
-)
-
-Add appropriate Room annotations and indexes.
-
-Store per-zone duration information through a related table or a well-defined serialized field.
-
-### **Heart-rate sample entity**
-
-data class HeartRateSampleEntity(  
-    val id: Long,  
-    val workoutId: String,  
-    val elapsedWorkoutMs: Long,  
-    val recordedAtEpochMs: Long,  
-    val bpm: Int,  
-    val zone: Int  
-)
-
-The schema may be adjusted to support monotonic interval accounting.
-
-Use elapsed workout time for graph positioning, including correct handling of pauses.
-
-For crash recovery, persist additional session checkpoint data as needed.
+Each sample includes its active elapsed timestamp, BPM, and a flag marking the beginning of a continuous segment. Use these values to reconstruct the chart, zone durations, No Data, time-weighted average, and peak BPM. Calculate statistics against the max HR captured at workout start. Deleting a workout removes its file and associated samples.
 
 ### **User preferences**
 
-Store in DataStore:
-
-selectedSensorIdentifier  
-selectedSensorName  
-configuredMaxHeartRate  
-preferredOrientation  
-keepScreenAwakeDuringWorkout  
-lastSelectedDashboardView  
-onboardingComplete
-
-Avoid persisting device-specific Bluetooth data that is not reliable across reinstalls.
-
-The configured max HR used for a workout should be captured at workout start so historical results remain reproducible after settings change.
+Use Android SharedPreferences for selected sensor identifier and name, configured maximum heart rate, whether the setup introduction was shown, and whether to keep the screen awake during a workout. Follow the tablet orientation and adapt the dashboard to the available width.
 
 ### **Privacy**
 
@@ -789,7 +736,7 @@ Explicitly handle these scenarios:
 | Corrupt BLE packet | Ignore packet; do not crash |
 | No sensor readings | Show `--`, not zero |
 | Sensor connected but no updates | Mark data stale and recover |
-| Room database error | Report failure rather than silently claiming data saved |
+| Workout file storage error | Report failure rather than silently claiming data saved |
 | Two H10s nearby | Reconnect to saved sensor, not whichever appears first |
 
 Include structured debug logging in debug builds.
@@ -910,7 +857,7 @@ Do not proceed too far with UI development before validating the Bluetooth path.
 
 ### **Phase 3 — Session persistence**
 
-* Implement Room schema.  
+* Implement versioned workout files and atomic checkpoints.
 * Record heart-rate samples.  
 * Track zone duration.  
 * Compute session summaries.  
@@ -965,7 +912,7 @@ You are responsible for implementing this specification as a complete, runnable 
 
 Follow these directives:
 
-1. Use Kotlin, Jetpack Compose, native Android BLE APIs, and Room.  
+1. Use Kotlin, Jetpack Compose, native Android BLE APIs, and local JSON workout storage.
 2. Prioritize end-to-end functionality on the real tablet.  
 3. Do not build a backend or introduce unnecessary cloud dependencies.  
 4. Write actual compilable implementation code, not pseudocode.  
