@@ -12,8 +12,10 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -48,6 +50,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -117,7 +120,14 @@ fun DashboardScreen(
     Scaffold { insets ->
         BoxWithConstraints(Modifier.fillMaxWidth().padding(insets)) {
             val wide = maxWidth >= 680.dp && maxWidth > maxHeight
-            val inlineHeader = maxWidth >= 560.dp
+            val inlineHeader = maxWidth >= 740.dp
+            val heartHeight = (maxHeight - if (inlineHeader) 128.dp else 176.dp).coerceAtLeast(280.dp)
+            val heartNumberSize = if (wide) {
+                minOf(maxWidth.value * 0.22f, heartHeight.value * 0.51f).coerceIn(112f, 290f)
+            } else {
+                (maxWidth.value * 0.39f).coerceIn(94f, 190f)
+            }
+            val railWidth = (maxWidth * 0.24f).coerceIn(218.dp, 300.dp)
             Column(
                 Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(
                     horizontal = if (wide) 24.dp else 18.dp,
@@ -135,11 +145,11 @@ fun DashboardScreen(
                 if (inlineHeader) {
                     Row(
                         Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        DashboardLogo(Modifier.weight(1f, fill = false))
-                        navigation()
+                        Spacer(Modifier.weight(1f))
+                        DashboardLogo()
+                        Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) { navigation() }
                     }
                 } else {
                     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -147,8 +157,11 @@ fun DashboardScreen(
                         navigation()
                     }
                 }
-                val heart: @Composable () -> Unit = {
-                    HeartPanel(bpm, zone, maxHr, message ?: state.status, simulated, wide)
+                val heart: @Composable (Modifier) -> Unit = { modifier ->
+                    HeartPanel(
+                        bpm, zone, maxHr, message ?: state.status, wide,
+                        heartNumberSize, modifier,
+                    )
                 }
                 val workout: @Composable () -> Unit = {
                     WorkoutPanel(
@@ -168,28 +181,32 @@ fun DashboardScreen(
                     }
                 }
                 val chart: @Composable () -> Unit = { TrendPanel(model.chartPoints, now, wide) }
+                val notices: @Composable () -> Unit = {
+                    workouts.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    if (phase == WorkoutPhase.ACTIVE) {
+                        model.trackingError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    }
+                    if (model.configuredMaxHr == null) {
+                        TextButton(onClick = { showSettings = true }) { Text("Set your max HR · 185 BPM provisional") }
+                    }
+                    if (!simulated && state.savedMonitorName == null) {
+                        OutlinedButton(onClick = { showMonitor = true }) { Text("Set up heart-rate monitor") }
+                    }
+                }
                 if (wide) {
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        Column(Modifier.weight(1f)) { heart() }
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        heart(Modifier.weight(1f).heightIn(min = heartHeight))
+                        Column(Modifier.width(railWidth), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             workout()
                             chart()
+                            notices()
                         }
                     }
                 } else {
-                    heart()
+                    heart(Modifier)
                     workout()
                     chart()
-                }
-                workouts.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                if (phase == WorkoutPhase.ACTIVE) {
-                    model.trackingError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                }
-                if (model.configuredMaxHr == null) {
-                    TextButton(onClick = { showSettings = true }) { Text("Set your max HR · 185 BPM provisional") }
-                }
-                if (!simulated && state.savedMonitorName == null) {
-                    OutlinedButton(onClick = { showMonitor = true }) { Text("Set up heart-rate monitor") }
+                    notices()
                 }
             }
         }
@@ -266,47 +283,82 @@ fun DashboardScreen(
 }
 
 @Composable
-private fun DashboardLogo(modifier: Modifier = Modifier) {
+private fun DashboardLogo() {
     Image(
         painter = painterResource(R.drawable.zachs_zones_header),
         contentDescription = stringResource(R.string.app_name),
-        modifier = modifier.width(352.dp).aspectRatio(3f),
+        modifier = Modifier.width(250.dp).aspectRatio(3f),
     )
 }
 
 @Composable
-private fun HeartPanel(bpm: Int?, zone: TrainingZone?, maxHr: Int, status: String, simulated: Boolean, wide: Boolean) {
-    Panel {
+private fun HeartPanel(
+    bpm: Int?,
+    zone: TrainingZone?,
+    maxHr: Int,
+    status: String,
+    wide: Boolean,
+    heartNumberSize: Float,
+    modifier: Modifier,
+) {
+    val zoneBackground = zone?.color
+    val darkInk = Color(0xFF101723)
+    val readingColor = if (zoneBackground != null) darkInk else MaterialTheme.colorScheme.onSurface
+    val secondaryColor = if (zoneBackground != null) darkInk else MaterialTheme.colorScheme.onSurfaceVariant
+
+    Panel(
+        modifier = modifier,
+        backgroundColor = zoneBackground ?: MaterialTheme.colorScheme.surface,
+        verticalArrangement = if (wide) Arrangement.SpaceBetween else Arrangement.spacedBy(7.dp),
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            val liveColor = if (bpm != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
-            Box(Modifier.size(8.dp).background(liveColor, CircleShape))
-            Text(status, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            val indicator = if (zoneBackground != null) darkInk else MaterialTheme.colorScheme.outline
+            Box(Modifier.size(8.dp).background(indicator, CircleShape))
+            Text(status, color = secondaryColor)
         }
-        Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+
+        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
                 bpm?.toString() ?: "—",
-                fontSize = if (wide) 94.sp else 102.sp,
-                lineHeight = if (wide) 96.sp else 104.sp,
+                color = readingColor,
+                fontSize = heartNumberSize.sp,
+                lineHeight = heartNumberSize.sp,
                 fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
             )
-            Text("BPM", Modifier.padding(bottom = 12.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("BPM", style = MaterialTheme.typography.headlineSmall, color = secondaryColor)
         }
-        if (zone != null && bpm != null) {
-            Text("Zone ${zone.number} · ${zone.label}", color = zone.color, style = MaterialTheme.typography.titleLarge)
-            val percent = String.format(Locale.getDefault(), "%.1f", TrainingZone.percent(bpm, maxHr))
-            Text("$percent% of max HR", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        } else {
-            Text("Waiting for heart rate", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-            TrainingZone.entries.forEach { segment ->
-                Box(
-                    Modifier.weight(1f).height(8.dp)
-                        .background(segment.color.copy(alpha = if (segment == zone) 1f else 0.40f), CircleShape)
+
+        Column(
+            Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(7.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            if (zone != null && bpm != null) {
+                Text(
+                    "Zone ${zone.number} · ${zone.label}",
+                    color = readingColor,
+                    style = MaterialTheme.typography.headlineMedium,
                 )
+                val percent = String.format(Locale.getDefault(), "%.1f", TrainingZone.percent(bpm, maxHr))
+                Text("$percent% of max HR", color = secondaryColor)
+            } else {
+                Text("Waiting for heart rate", color = secondaryColor)
+            }
+            val strip = Modifier.fillMaxWidth()
+            Row(
+                if (zoneBackground != null) strip.background(darkInk, CircleShape).padding(4.dp) else strip,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                TrainingZone.entries.forEach { segment ->
+                    Box(
+                        Modifier.weight(1f).height(if (wide) 12.dp else 8.dp)
+                            .background(segment.color.copy(alpha = if (segment == zone) 1f else 0.58f), CircleShape)
+                    )
+                }
             }
         }
-        if (simulated) Text("Simulator mode", color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -394,12 +446,21 @@ private fun TrendPanel(points: List<ChartPoint>, now: Long, wide: Boolean) {
 }
 
 @Composable
-internal fun Panel(content: @Composable ColumnScope.() -> Unit) {
+internal fun Panel(
+    modifier: Modifier = Modifier,
+    verticalArrangement: Arrangement.Vertical = Arrangement.spacedBy(7.dp),
+    backgroundColor: Color = MaterialTheme.colorScheme.surface,
+    content: @Composable ColumnScope.() -> Unit,
+) {
     val shape = RoundedCornerShape(18.dp)
     Column(
-        Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface, shape)
-            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.40f), shape).padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(7.dp),
+        modifier.fillMaxWidth().background(backgroundColor, shape)
+            .border(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.40f),
+                shape = shape,
+            ).padding(16.dp),
+        verticalArrangement = verticalArrangement,
         content = content,
     )
 }
@@ -458,11 +519,11 @@ private fun DashboardSettingsDialog(
 
 internal val TrainingZone.color: Color
     get() = when (this) {
-        TrainingZone.GRAY -> Color(0xFFB4C0D0)
-        TrainingZone.BLUE -> Color(0xFF79B6FF)
-        TrainingZone.GREEN -> Color(0xFF73E4A5)
-        TrainingZone.ORANGE -> Color(0xFFFFB46B)
-        TrainingZone.RED -> Color(0xFFFF8490)
+        TrainingZone.GRAY -> Color(0xFFE3E9F3)
+        TrainingZone.BLUE -> Color(0xFF50BDFF)
+        TrainingZone.GREEN -> Color(0xFF54FA80)
+        TrainingZone.ORANGE -> Color(0xFFFFAA38)
+        TrainingZone.RED -> Color(0xFFFF6675)
     }
 
 internal fun formatElapsed(ms: Long): String {
