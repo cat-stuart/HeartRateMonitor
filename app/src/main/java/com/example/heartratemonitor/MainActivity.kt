@@ -5,7 +5,10 @@ import android.annotation.SuppressLint
 import android.app.Application
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -34,6 +37,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.compose.runtime.collectAsState
 import com.example.heartratemonitor.bluetooth.BleHeartRateSensor
+import com.example.heartratemonitor.bluetooth.ConnectionState
 import com.example.heartratemonitor.bluetooth.HeartRateSensor
 import com.example.heartratemonitor.bluetooth.SensorState
 import com.example.heartratemonitor.bluetooth.SimulatedHeartRateSensor
@@ -47,17 +51,25 @@ class MainActivity : ComponentActivity() {
         } else {
             arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
         }
+    private val bluetoothChanges = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == BluetoothAdapter.ACTION_STATE_CHANGED) refreshBluetooth()
+        }
+    }
+
+    private var scanRequested = false
     private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        if (hasPermissions()) scanWithBluetooth()
+        if (hasPermissions()) continueBluetoothAction()
         else model.message = "Allow Bluetooth access in app settings, then scan again."
     }
     private val enableBluetooth = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        if (it.resultCode == RESULT_OK) scanWithBluetooth()
+        if (it.resultCode == RESULT_OK) continueBluetoothAction()
         else model.message = "Turn on Bluetooth to scan for your monitor."
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        scanRequested = savedInstanceState?.getBoolean("scanRequested") ?: false
         setContent {
             HeartRateMonitorTheme(darkTheme = true) {
                 val sensor = model.sensor
@@ -67,11 +79,52 @@ class MainActivity : ComponentActivity() {
                     message = model.message,
                     simulated = model.simulated,
                     scan = ::scan,
+                    reconnect = ::reconnect,
                     connect = sensor::connect,
-                    toggleSimulator = model::toggleSimulator,
+                    toggleSimulator = {
+                        model.toggleSimulator()
+                        refreshBluetooth()
+                    },
                 )
             }
         }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean("scanRequested", scanRequested)
+        super.onSaveInstanceState(outState)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        ContextCompat.registerReceiver(
+            this, bluetoothChanges, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
+            ContextCompat.RECEIVER_EXPORTED,
+        )
+        refreshBluetooth()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        refreshBluetooth()
+    }
+
+    override fun onStop() {
+        unregisterReceiver(bluetoothChanges)
+        if (!isChangingConfigurations) model.updateBluetooth(false, false, false)
+        super.onStop()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun refreshBluetooth() {
+        val permitted = hasPermissions()
+        val enabled = permitted && getSystemService(BluetoothManager::class.java)?.adapter?.isEnabled == true
+        model.updateBluetooth(true, permitted, enabled)
+    }
+
+    private fun reconnect() {
+        scanRequested = false
+        beginBluetoothAction()
     }
 
     private fun hasPermissions() = permissions.all {
@@ -79,22 +132,31 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun scan() {
+        scanRequested = true
+        beginBluetoothAction()
+    }
+
+    private fun beginBluetoothAction() {
         model.message = null
-        when {
-            model.simulated -> model.sensor.scan()
-            hasPermissions() -> scanWithBluetooth()
-            else -> permissionRequest.launch(permissions)
-        }
+        if (hasPermissions()) continueBluetoothAction() else permissionRequest.launch(permissions)
     }
 
     @SuppressLint("MissingPermission")
-    private fun scanWithBluetooth() {
+    private fun continueBluetoothAction() {
         if (model.simulated || !hasPermissions()) return
         val adapter = getSystemService(BluetoothManager::class.java)?.adapter
         when {
             adapter == null -> model.message = "Bluetooth is unavailable on this device."
-            adapter.isEnabled -> model.sensor.scan()
-            else -> enableBluetooth.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
+            !adapter.isEnabled -> enableBluetooth.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
+            else -> {
+                if (scanRequested) {
+                    refreshBluetooth()
+                    model.sensor.scan()
+                } else {
+                    model.reconnect()
+                    refreshBluetooth()
+                }
+            }
         }
     }
 }
@@ -107,9 +169,17 @@ class SensorViewModel(application: Application) : AndroidViewModel(application) 
     var message by mutableStateOf<String?>(null)
     val sensor: HeartRateSensor get() = if (simulated) simulator else bluetooth
 
+    fun updateBluetooth(inForeground: Boolean, permitted: Boolean, enabled: Boolean) {
+        if (simulated) return
+        bluetooth.updateAvailability(inForeground, permitted, enabled)
+        if (inForeground && permitted && enabled) message = null
+    }
+
+    fun reconnect() = bluetooth.reconnect()
+
     fun toggleSimulator() {
         if (!BuildConfig.DEBUG) return
-        sensor.stop()
+        if (simulated) simulator.stop() else bluetooth.updateAvailability(false, false, false)
         message = null
         simulated = !simulated
         if (simulated) sensor.connect("simulated")
@@ -126,6 +196,7 @@ private fun SensorScreen(
     message: String?,
     simulated: Boolean,
     scan: () -> Unit,
+    reconnect: () -> Unit,
     connect: (String) -> Unit,
     toggleSimulator: () -> Unit,
 ) {
@@ -142,7 +213,13 @@ private fun SensorScreen(
             Text("${state.bpm ?: "—"} BPM", style = MaterialTheme.typography.displayLarge)
             Text(message ?: state.status, style = MaterialTheme.typography.titleMedium)
             if (!simulated) {
-                Button(onClick = scan, enabled = !state.busy) { Text("Scan for monitors") }
+                state.savedMonitorName?.let { name ->
+                    Text("Saved monitor · $name")
+                    Button(onClick = reconnect) { Text("Reconnect") }
+                }
+                OutlinedButton(onClick = scan, enabled = state.connection != ConnectionState.SCANNING || !state.busy) {
+                    Text("Scan for monitors")
+                }
             }
             state.devices.forEach { device ->
                 OutlinedButton(onClick = { connect(device.id) }) {

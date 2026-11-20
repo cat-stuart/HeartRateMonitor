@@ -25,22 +25,59 @@ import kotlinx.coroutines.flow.asStateFlow
 class BleHeartRateSensor(private val context: Context) : HeartRateSensor {
     private val adapter get() = context.getSystemService(BluetoothManager::class.java)?.adapter
     private val handler = Handler(Looper.getMainLooper())
-    private val mutableState = MutableStateFlow(SensorState())
+    private val store = SavedMonitorStore(context)
+    private var savedMonitor = store.load()
+    private var target: SensorDevice? = null
+    private var active = false
+    private var retryIndex = 0
+    private val mutableState = MutableStateFlow(SensorState(savedMonitorName = savedMonitor?.name))
     override val state = mutableState.asStateFlow()
     private var scanCallback: ScanCallback? = null
     private var stopScan: (() -> Unit)? = null
     private var gatt: BluetoothGatt? = null
-    private val timeout = Runnable { fail("The sensor did not respond. Scan again to retry.") }
+    private val retry = Runnable { savedMonitor?.let { open(it, reconnecting = true) } }
+    private val timeout = Runnable {
+        val reason = if (mutableState.value.bpm == null) "The monitor did not respond" else "No recent heart-rate readings"
+        fail(reason, ConnectionState.DISCONNECTED)
+    }
     private val scanTimeout = Runnable {
         endScan()
         val current = mutableState.value
         mutableState.value = current.copy(
+            connection = if (current.devices.isEmpty()) ConnectionState.DISCONNECTED else ConnectionState.SCANNING,
             busy = false,
             status = if (current.devices.isEmpty()) "No heart-rate monitors found" else "Select your heart-rate monitor",
         )
     }
 
+    fun updateAvailability(inForeground: Boolean, permitted: Boolean, enabled: Boolean) {
+        val ready = inForeground && permitted && enabled
+        if (!ready) {
+            active = false
+            stop()
+            if (inForeground) {
+                val status = if (permitted) "Turn on Bluetooth to connect" else "Allow Nearby Devices access to connect"
+                val connection = if (permitted) ConnectionState.BLUETOOTH_DISABLED else ConnectionState.PERMISSION_REQUIRED
+                publish(SensorState(connection = connection, status = status))
+            }
+        } else if (!active) {
+            active = true
+            reconnect()
+        }
+    }
+
+    fun reconnect() {
+        if (!active) return
+        val monitor = savedMonitor ?: run {
+            publish(SensorState())
+            return
+        }
+        stop()
+        open(monitor, reconnecting = true)
+    }
+
     override fun scan() {
+        if (!active) return
         stop()
         try {
             val bluetooth = adapter
@@ -77,11 +114,12 @@ class BleHeartRateSensor(private val context: Context) : HeartRateSensor {
                         result.rssi,
                     )
                     val devices = mutableState.value.devices.filterNot { it.id == device.id } + device
-                    mutableState.value = SensorState(
+                    publish(SensorState(
+                        connection = ConnectionState.SCANNING,
                         status = "Select your heart-rate monitor",
                         devices = devices.sortedByDescending { it.rssi ?: Int.MIN_VALUE },
                         busy = true,
-                    )
+                    ))
                 }
 
                 override fun onScanFailed(errorCode: Int) {
@@ -92,11 +130,12 @@ class BleHeartRateSensor(private val context: Context) : HeartRateSensor {
             }
             scanCallback = callback
             stopScan = { scanner.stopScan(callback) }
-            mutableState.value = SensorState(
+            publish(SensorState(
+                connection = ConnectionState.SCANNING,
                 status = if (pairedMonitors.isEmpty()) "Scanning nearby monitors" else "Select your heart-rate monitor",
                 devices = pairedMonitors,
                 busy = true,
-            )
+            ))
             scanner.startScan(
                 null,
                 ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(),
@@ -111,24 +150,44 @@ class BleHeartRateSensor(private val context: Context) : HeartRateSensor {
     }
 
     override fun connect(id: String) {
+        if (!active) return
+        val monitor = mutableState.value.devices.firstOrNull { it.id == id } ?: return
         stop()
+        open(monitor, reconnecting = false)
+    }
+
+    private fun open(monitor: SensorDevice, reconnecting: Boolean) {
+        if (!active) return
+        target = monitor
         try {
             val bluetooth = adapter
             if (bluetooth == null || !bluetooth.isEnabled) {
                 fail("Turn on Bluetooth to connect")
                 return
             }
-            mutableState.value = SensorState(status = "Connecting to monitor", busy = true)
-            gatt = bluetooth.getRemoteDevice(id).connectGatt(context, false, callbacks, BluetoothDevice.TRANSPORT_LE)
-            if (gatt == null) fail("Could not connect. Scan again to retry.") else armTimeout(15_000)
+            publish(SensorState(
+                connection = if (reconnecting) ConnectionState.RECONNECTING else ConnectionState.CONNECTING,
+                status = if (reconnecting) "Connecting to ${monitor.name}…" else "Connecting to monitor…",
+                busy = true,
+            ))
+            gatt = bluetooth.getRemoteDevice(monitor.id).connectGatt(context, false, callbacks, BluetoothDevice.TRANSPORT_LE)
+            if (gatt == null) fail("Could not connect to the monitor") else armTimeout(15_000)
         } catch (_: SecurityException) {
             fail("Bluetooth permission is required")
         } catch (_: IllegalArgumentException) {
-            fail("Invalid monitor. Scan again to retry.")
+            fail("Invalid monitor")
         }
     }
 
     override fun stop() {
+        handler.removeCallbacks(retry)
+        retryIndex = 0
+        target = null
+        releaseConnection()
+        publish(SensorState())
+    }
+
+    private fun releaseConnection() {
         endScan()
         handler.removeCallbacks(timeout)
         val previous = gatt
@@ -138,7 +197,10 @@ class BleHeartRateSensor(private val context: Context) : HeartRateSensor {
         } catch (_: SecurityException) {
             // Bluetooth permission was revoked.
         }
-        mutableState.value = SensorState()
+    }
+
+    private fun publish(state: SensorState) {
+        mutableState.value = state.copy(savedMonitorName = savedMonitor?.name)
     }
 
     private fun endScan() {
@@ -160,9 +222,16 @@ class BleHeartRateSensor(private val context: Context) : HeartRateSensor {
         handler.postDelayed(timeout, delayMs)
     }
 
-    private fun fail(message: String) {
-        stop()
-        mutableState.value = SensorState(status = message)
+    private fun fail(message: String, connection: ConnectionState = ConnectionState.ERROR) {
+        releaseConnection()
+        val monitor = savedMonitor
+        if (active && monitor != null && monitor.id == target?.id) {
+            publish(SensorState(connection = ConnectionState.RECONNECTING, status = "$message. Retrying…"))
+            handler.postDelayed(retry, RETRY_DELAYS[retryIndex])
+            retryIndex = (retryIndex + 1).coerceAtMost(RETRY_DELAYS.lastIndex)
+        } else {
+            publish(SensorState(connection = connection, status = message))
+        }
     }
 
     private fun onCurrent(connection: BluetoothGatt, action: () -> Unit) {
@@ -182,7 +251,7 @@ class BleHeartRateSensor(private val context: Context) : HeartRateSensor {
                 if (status == BluetoothGatt.GATT_SUCCESS && newState == BluetoothProfile.STATE_CONNECTED) {
                     if (!connection.discoverServices()) fail("Could not discover heart-rate services")
                 } else if (status != BluetoothGatt.GATT_SUCCESS || newState == BluetoothProfile.STATE_DISCONNECTED) {
-                    fail("Monitor disconnected. Scan again to reconnect.")
+                    fail("Monitor disconnected", ConnectionState.DISCONNECTED)
                 }
             }
 
@@ -202,7 +271,7 @@ class BleHeartRateSensor(private val context: Context) : HeartRateSensor {
                 if (status != BluetoothGatt.GATT_SUCCESS) {
                     fail("Monitor rejected heart-rate notifications")
                 } else if (mutableState.value.bpm == null) {
-                    mutableState.value = SensorState(status = "Waiting for first reading", busy = true)
+                    publish(mutableState.value.copy(status = "Waiting for first reading"))
                 }
             }
 
@@ -224,8 +293,14 @@ class BleHeartRateSensor(private val context: Context) : HeartRateSensor {
     private fun receive(connection: BluetoothGatt, packet: ByteArray) {
         val bpm = HeartRateParser.parse(packet) ?: return
         onCurrent(connection) {
-            mutableState.value = SensorState(status = "Live from monitor", bpm = bpm)
-            armTimeout(5_000)
+            val monitor = target ?: return@onCurrent
+            if (savedMonitor?.id != monitor.id || savedMonitor?.name != monitor.name) {
+                savedMonitor = monitor
+                store.save(monitor)
+            }
+            retryIndex = 0
+            publish(SensorState(connection = ConnectionState.CONNECTED, status = "Live from monitor", bpm = bpm))
+            armTimeout(FRESHNESS_MS)
         }
     }
 
@@ -244,6 +319,8 @@ class BleHeartRateSensor(private val context: Context) : HeartRateSensor {
         name?.startsWith("Polar H10", ignoreCase = true) == true
 
     private companion object {
+        const val FRESHNESS_MS = 5_000L
+        val RETRY_DELAYS = longArrayOf(2_000, 5_000, 10_000, 20_000, 30_000)
         val SERVICE: UUID = UUID.fromString("0000180d-0000-1000-8000-00805f9b34fb")
         val MEASUREMENT: UUID = UUID.fromString("00002a37-0000-1000-8000-00805f9b34fb")
         val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
